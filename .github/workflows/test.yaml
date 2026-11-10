@@ -8,16 +8,35 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    strategy:
+      matrix:
+        python-version: [ '3.10', '3.11', '3.12', '3.13' ]
+    name: Lint ${{ matrix.python-version }}
+    runs-on: 'ubuntu-24.04'
+    container: python:${{ matrix.python-version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Lint code
+        run: |
+          pip install -c requirements.txt -r requirements-lint.txt
+          mypy
+          ruff check
+          ruff format
+
   # Run tests
   test:
     strategy:
       matrix:
-        python-version: ['3.6', '3.7', '3.8', '3.9']
-        os: ['ubuntu-20.04']
-        redis-version: [4, 5, 6]
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+        os: ['ubuntu-24.04']
+        redis-version: [4, 5, "6.2.6", "7.0.9"]
+        redis-py-version: [4.6.0, 6.1.0]
       # Do not cancel any jobs when a single job fails
       fail-fast: false
-    name: Python ${{ matrix.python-version }} on ${{ matrix.os }} with Redis ${{ matrix.redis-version }}
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }} with Redis ${{ matrix.redis-version }} and redis-py==${{ matrix.redis-py-version }}
     runs-on: ${{ matrix.os }}
     container: python:${{ matrix.python-version }}
     services:
@@ -31,16 +50,12 @@ jobs:
           --health-retries 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
-
-      - name: Lint code
-        run: |
-          pip install black==21.7b0
-          black . --check
+        uses: actions/checkout@v6
 
       - name: Install dependencies
         run: |
-          pip install --requirement requirements.txt --requirement requirements-test.txt
+          pip install -r requirements.txt -r requirements-test.txt
+          pip install redis==${{ matrix.redis-py-version }}
 
       - name: Run tests
         run: pytest

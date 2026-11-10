@@ -1,3 +1,4 @@
+.dmypy.json
 *.pyc
 .DS_Store
 build/
@@ -6,3 +7,4 @@ dist/
 .tox/
 .idea/
 venv/
+.python-version

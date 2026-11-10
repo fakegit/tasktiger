@@ -1,28 +1,30 @@
 import datetime
 import logging
+import time
+
 import redis
 import structlog
-import time
+
 from tasktiger import TaskTiger, Worker, fixed
 
-from .config import DELAY, TEST_DB, REDIS_HOST
+from .config import DELAY, REDIS_HOST, TEST_DB
 
 TEST_TIGER_CONFIG = {
     # We need this 0 here so we don't pick up scheduled tasks when
     # doing a single worker run.
-    'ACTIVE_TASK_UPDATE_TIMEOUT': 2 * DELAY,
-    'BATCH_QUEUES': {'batch': 3},
-    'DEFAULT_RETRY_METHOD': fixed(DELAY, 2),
-    'EXCLUDE_QUEUES': ['periodic_ignore'],
-    'LOCK_RETRY': DELAY * 2.0,
-    'QUEUE_SCHEDULED_TASKS_TIME': DELAY,
-    'REQUEUE_EXPIRED_TASKS_INTERVAL': DELAY,
-    'SELECT_TIMEOUT': 0,
-    'SINGLE_WORKER_QUEUES': ['swq'],
+    "ACTIVE_TASK_UPDATE_TIMEOUT": 2 * DELAY,
+    "BATCH_QUEUES": {"batch": 3},
+    "DEFAULT_RETRY_METHOD": fixed(DELAY, 2),
+    "EXCLUDE_QUEUES": ["periodic_ignore"],
+    "LOCK_RETRY": DELAY * 2.0,
+    "QUEUE_SCHEDULED_TASKS_TIME": DELAY,
+    "REQUEUE_EXPIRED_TASKS_INTERVAL": DELAY,
+    "SELECT_TIMEOUT": 0,
+    "SINGLE_WORKER_QUEUES": ["swq"],
 }
 
 
-class Patch(object):
+class Patch:
     """
     Simple context manager to patch a function, e.g.:
 
@@ -50,7 +52,7 @@ def setup_structlog():
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,
     )
-    logging.basicConfig(format='%(message)s')
+    logging.basicConfig(format="%(message)s")
 
 
 def get_redis():
@@ -68,7 +70,7 @@ def get_tiger():
     return tiger
 
 
-def external_worker(n=None, patch_config=None, max_workers_per_queue=None):
+def external_worker(n=None, patch_config=None, worker_kwargs=None):
     """
     Runs a worker. To be used with multiprocessing.Pool.map.
     """
@@ -77,15 +79,14 @@ def external_worker(n=None, patch_config=None, max_workers_per_queue=None):
     if patch_config:
         tiger.config.update(patch_config)
 
-    worker = Worker(tiger)
+    if worker_kwargs is None:
+        worker_kwargs = {}
 
-    if max_workers_per_queue is not None:
-        worker.max_workers_per_queue = max_workers_per_queue
+    Worker(tiger, **worker_kwargs).run(once=True, force_once=True)
 
-    worker.run(once=True, force_once=True)
     tiger.connection.close()
 
 
 def sleep_until_next_second():
     now = datetime.datetime.utcnow()
-    time.sleep(1 - now.microsecond / 10.0 ** 6)
+    time.sleep(1 - now.microsecond / 10.0**6)

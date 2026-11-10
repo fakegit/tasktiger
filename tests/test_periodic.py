@@ -3,16 +3,15 @@
 import datetime
 import time
 
-from tasktiger import Worker, periodic
-from tasktiger import (
-    Task,
-    gen_unique_id,
-    serialize_func_name,
+from tasktiger import Task, Worker, cron_expr, periodic
+from tasktiger._internal import (
     QUEUED,
     SCHEDULED,
+    gen_unique_id,
+    serialize_func_name,
 )
 
-from .tasks_periodic import tiger, periodic_task
+from .tasks_periodic import periodic_task, tiger
 from .test_base import BaseTestCase
 from .utils import sleep_until_next_second
 
@@ -60,10 +59,54 @@ class TestPeriodicTasks(BaseTestCase):
         ) == datetime.datetime(2010, 1, 1, 0, 0)
 
         f = periodic(minutes=1, end_date=dt)
-        assert f[0](datetime.datetime(2010, 1, 1, 0, 0), *f[1]) == None
+        assert f[0](datetime.datetime(2010, 1, 1, 0, 0), *f[1]) is None
 
         f = periodic(minutes=1, end_date=dt)
-        assert f[0](datetime.datetime(2010, 1, 1, 0, 1), *f[1]) == None
+        assert f[0](datetime.datetime(2010, 1, 1, 0, 1), *f[1]) is None
+
+    def test_cron_schedule(self):
+        """
+        Test the cron_expr() schedule function.
+        """
+        dt = datetime.datetime(2010, 1, 1)
+
+        f = cron_expr("* * * * *")
+        assert f[0](dt, *f[1]) == datetime.datetime(2010, 1, 1, 0, 1)
+
+        f = cron_expr("0 * * * *")
+        assert f[0](dt, *f[1]) == datetime.datetime(2010, 1, 1, 1)
+
+        f = cron_expr("0 0 * * *")
+        assert f[0](dt, *f[1]) == datetime.datetime(2010, 1, 2)
+
+        f = cron_expr("0 0 * * 6")
+        # 2010-01-02 is a Saturday
+        assert f[0](dt, *f[1]) == datetime.datetime(2010, 1, 2)
+
+        f = cron_expr("0 0 * * 0", start_date=datetime.datetime(2000, 1, 2))
+        # 2000-01-02 is a Sunday and 2010-01-02 is a Saturday
+        assert f[0](dt, *f[1]) == datetime.datetime(2010, 1, 3)
+
+        f = cron_expr("2 3 * * *", start_date=dt)
+        assert f[0](dt, *f[1]) == datetime.datetime(2010, 1, 1, 3, 2)
+        # Make sure we return the start_date if the current date is earlier.
+        assert f[0](datetime.datetime(1990, 1, 1), *f[1]) == dt
+
+        f = cron_expr("* * * * *", end_date=dt)
+        assert f[0](
+            datetime.datetime(2009, 12, 31, 23, 58), *f[1]
+        ) == datetime.datetime(2009, 12, 31, 23, 59)
+
+        f = cron_expr("* * * * *", end_date=dt)
+        assert f[0](
+            datetime.datetime(2009, 12, 31, 23, 59), *f[1]
+        ) == datetime.datetime(2010, 1, 1, 0, 0)
+
+        f = cron_expr("* * * * *", end_date=dt)
+        assert f[0](datetime.datetime(2010, 1, 1, 0, 0), *f[1]) is None
+
+        f = cron_expr("* * * * *", end_date=dt)
+        assert f[0](datetime.datetime(2010, 1, 1, 0, 1), *f[1]) is None
 
     def test_periodic_execution(self):
         """
@@ -89,25 +132,25 @@ class TestPeriodicTasks(BaseTestCase):
         # of "scheduled" to ensure immediate execution. We capture this
         # condition by running the task, and retry.
         try:
-            self._ensure_queues(scheduled={'periodic': 1})
+            self._ensure_queues(scheduled={"periodic": 1})
         except AssertionError:
             Worker(tiger).run(once=True)
-            self._ensure_queues(scheduled={'periodic': 1})
-            assert int(self.conn.get('period_count')) == 1
-            self.conn.delete('period_count')
+            self._ensure_queues(scheduled={"periodic": 1})
+            assert int(self.conn.get("period_count")) == 1
+            self.conn.delete("period_count")
 
         def ensure_run(n):
             # Run worker twice (once to move from scheduled to queued, and once
             # to execute the task)
             Worker(tiger).run(once=True)
-            self._ensure_queues(queued={'periodic': 1})
+            self._ensure_queues(queued={"periodic": 1})
             Worker(tiger).run(once=True)
-            self._ensure_queues(scheduled={'periodic': 1})
+            self._ensure_queues(scheduled={"periodic": 1})
 
-            assert int(self.conn.get('period_count')) == n
+            assert int(self.conn.get("period_count")) == n
 
             # The task is requeued for the next period
-            self._ensure_queues(scheduled={'periodic': 1})
+            self._ensure_queues(scheduled={"periodic": 1})
 
         # Sleep until the next second
         sleep_until_next_second()
@@ -136,33 +179,31 @@ class TestPeriodicTasks(BaseTestCase):
         # therefore use `tiger` from the tasks module instead of `self.tiger`.
         self._ensure_queues()
         Worker(tiger).run(once=True)
-        self._ensure_queues(scheduled={'periodic': 1})
+        self._ensure_queues(scheduled={"periodic": 1})
         time.sleep(1)
         Worker(tiger).run(once=True)
-        self._ensure_queues(queued={'periodic': 1})
+        self._ensure_queues(queued={"periodic": 1})
 
         # generate the expected unique id
-        expected_unique_id = gen_unique_id(
-            serialize_func_name(periodic_task), [], {}
-        )
+        expected_unique_id = gen_unique_id(serialize_func_name(periodic_task), [], {})
 
         # pull task out of the queue by id. If found, then the id is correct
-        task = Task.from_id(tiger, 'periodic', QUEUED, expected_unique_id)
+        task = Task.from_id(tiger, "periodic", QUEUED, expected_unique_id)
         assert task is not None
 
         # execute and reschedule the task
-        self._ensure_queues(queued={'periodic': 1})
+        self._ensure_queues(queued={"periodic": 1})
         Worker(tiger).run(once=True)
-        self._ensure_queues(scheduled={'periodic': 1})
+        self._ensure_queues(scheduled={"periodic": 1})
 
         # wait for the task to need to be queued
         time.sleep(1)
         Worker(tiger).run(once=True)
-        self._ensure_queues(queued={'periodic': 1})
+        self._ensure_queues(queued={"periodic": 1})
 
         # The unique id shouldn't change between executions. Try finding the
         # task by id again
-        task = Task.from_id(tiger, 'periodic', QUEUED, expected_unique_id)
+        task = Task.from_id(tiger, "periodic", QUEUED, expected_unique_id)
         assert task is not None
 
     def test_periodic_execution_unique_ids_manual_scheduling(self):
@@ -182,16 +223,16 @@ class TestPeriodicTasks(BaseTestCase):
         # therefore use `tiger` from the tasks module instead of `self.tiger`.
         self._ensure_queues()
         Worker(tiger).run(once=True)
-        self._ensure_queues(scheduled={'periodic': 1})
+        self._ensure_queues(scheduled={"periodic": 1})
         time.sleep(1)
         Worker(tiger).run(once=True)
-        self._ensure_queues(queued={'periodic': 1})
+        self._ensure_queues(queued={"periodic": 1})
 
         # schedule the task manually
         periodic_task.delay()
 
         # make sure a duplicate wasn't scheduled
-        self._ensure_queues(queued={'periodic': 1})
+        self._ensure_queues(queued={"periodic": 1})
 
     def test_periodic_execution_unique_ids_self_correct(self):
         """
@@ -201,9 +242,7 @@ class TestPeriodicTasks(BaseTestCase):
         sleep_until_next_second()
 
         # generate the ids
-        correct_unique_id = gen_unique_id(
-            serialize_func_name(periodic_task), [], {}
-        )
+        correct_unique_id = gen_unique_id(serialize_func_name(periodic_task), [], {})
         malformed_unique_id = gen_unique_id(
             serialize_func_name(periodic_task), None, None
         )
@@ -212,22 +251,22 @@ class TestPeriodicTasks(BaseTestCase):
 
         # patch the id to something slightly wrong
         assert task.id == correct_unique_id
-        task._data['id'] = malformed_unique_id
+        task._data["id"] = malformed_unique_id
         assert task.id == malformed_unique_id
 
         # schedule the task
         task.delay()
-        self._ensure_queues(queued={'periodic': 1})
+        self._ensure_queues(queued={"periodic": 1})
 
         # pull task out of the queue by the malformed id
-        task = Task.from_id(tiger, 'periodic', QUEUED, malformed_unique_id)
+        task = Task.from_id(tiger, "periodic", QUEUED, malformed_unique_id)
         assert task is not None
 
         Worker(tiger).run(once=True)
-        self._ensure_queues(scheduled={'periodic': 1})
+        self._ensure_queues(scheduled={"periodic": 1})
 
         # pull task out of the queue by the self-corrected id
-        task = Task.from_id(tiger, 'periodic', SCHEDULED, correct_unique_id)
+        task = Task.from_id(tiger, "periodic", SCHEDULED, correct_unique_id)
         assert task is not None
 
     def test_successful_execution_clears_executions_from_retries(self):
@@ -242,39 +281,35 @@ class TestPeriodicTasks(BaseTestCase):
         Worker(tiger).run(once=True)
 
         # Prepare to execute the periodic task (as retriable failure).
-        tiger.connection.set('fail-periodic-task', 'retriable')
-        n_total, tasks = Task.tasks_from_queue(tiger, 'periodic', SCHEDULED)
+        tiger.connection.set("fail-periodic-task", "retriable")
+        n_total, tasks = Task.tasks_from_queue(tiger, "periodic", SCHEDULED)
         task_id = tasks[0].id
         time.sleep(1)
 
         # Queue the periodic task.
-        self._ensure_queues(scheduled={'periodic': 1})
+        self._ensure_queues(scheduled={"periodic": 1})
         Worker(tiger).run(once=True)
 
         # Run the failing periodic task.
-        self._ensure_queues(queued={'periodic': 1})
+        self._ensure_queues(queued={"periodic": 1})
         Worker(tiger).run(once=True)
 
-        task = Task.from_id(
-            tiger, 'periodic', SCHEDULED, task_id, load_executions=10
-        )
+        task = Task.from_id(tiger, "periodic", SCHEDULED, task_id, load_executions=10)
         assert len(task.executions) == 1
 
-        tiger.connection.delete('fail-periodic-task')
+        tiger.connection.delete("fail-periodic-task")
         time.sleep(1)
 
         # Queue the periodic task.
-        self._ensure_queues(scheduled={'periodic': 1})
+        self._ensure_queues(scheduled={"periodic": 1})
         Worker(tiger).run(once=True)
 
         # Run the successful periodic task.
-        self._ensure_queues(queued={'periodic': 1})
+        self._ensure_queues(queued={"periodic": 1})
         Worker(tiger).run(once=True)
 
         # Ensure we cleared any previous executions.
-        task = Task.from_id(
-            tiger, 'periodic', SCHEDULED, task_id, load_executions=10
-        )
+        task = Task.from_id(tiger, "periodic", SCHEDULED, task_id, load_executions=10)
         assert len(task.executions) == 0
 
     def test_successful_execution_doesnt_clear_previous_errors(self):
@@ -289,37 +324,33 @@ class TestPeriodicTasks(BaseTestCase):
         Worker(tiger).run(once=True)
 
         # Prepare to execute the periodic task (as permanent failure).
-        tiger.connection.set('fail-periodic-task', 'permanent')
-        n_total, tasks = Task.tasks_from_queue(tiger, 'periodic', SCHEDULED)
+        tiger.connection.set("fail-periodic-task", "permanent")
+        n_total, tasks = Task.tasks_from_queue(tiger, "periodic", SCHEDULED)
         task_id = tasks[0].id
         time.sleep(1)
 
         # Queue the periodic task.
-        self._ensure_queues(scheduled={'periodic': 1})
+        self._ensure_queues(scheduled={"periodic": 1})
         Worker(tiger).run(once=True)
 
         # Run the failing periodic task.
-        self._ensure_queues(queued={'periodic': 1})
+        self._ensure_queues(queued={"periodic": 1})
         Worker(tiger).run(once=True)
 
-        task = Task.from_id(
-            tiger, 'periodic', SCHEDULED, task_id, load_executions=10
-        )
+        task = Task.from_id(tiger, "periodic", SCHEDULED, task_id, load_executions=10)
         assert len(task.executions) == 1
 
-        tiger.connection.delete('fail-periodic-task')
+        tiger.connection.delete("fail-periodic-task")
         time.sleep(1)
 
         # Queue the periodic task.
-        self._ensure_queues(scheduled={'periodic': 1}, error={'periodic': 1})
+        self._ensure_queues(scheduled={"periodic": 1}, error={"periodic": 1})
         Worker(tiger).run(once=True)
 
         # Run the successful periodic task.
-        self._ensure_queues(queued={'periodic': 1}, error={'periodic': 1})
+        self._ensure_queues(queued={"periodic": 1}, error={"periodic": 1})
         Worker(tiger).run(once=True)
 
         # Ensure we didn't clear previous executions.
-        task = Task.from_id(
-            tiger, 'periodic', SCHEDULED, task_id, load_executions=10
-        )
+        task = Task.from_id(tiger, "periodic", SCHEDULED, task_id, load_executions=10)
         assert len(task.executions) == 1

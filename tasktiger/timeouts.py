@@ -1,25 +1,26 @@
-# -*- coding: utf-8 -*-
-from __future__ import (
-    absolute_import,
-    division,
-    print_function,
-    unicode_literals,
-)
+import os
 import signal
+from types import TracebackType
+from typing import Any, Literal, Optional, Type
 
 from .exceptions import JobTimeoutException
 
 
-class BaseDeathPenalty(object):
+class BaseDeathPenalty:
     """Base class to setup job timeouts."""
 
-    def __init__(self, timeout):
+    def __init__(self, timeout: float) -> None:
         self._timeout = timeout
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         self.setup_death_penalty()
 
-    def __exit__(self, type, value, traceback):
+    def __exit__(
+        self,
+        type: Optional[Type[BaseException]],
+        value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> Literal[False]:
         # Always cancel immediately, since we're done
         try:
             self.cancel_death_penalty()
@@ -35,29 +36,44 @@ class BaseDeathPenalty(object):
         # invoking context.
         return False
 
-    def setup_death_penalty(self):
+    def setup_death_penalty(self) -> None:
         raise NotImplementedError()
 
-    def cancel_death_penalty(self):
+    def cancel_death_penalty(self) -> None:
         raise NotImplementedError()
 
 
 class UnixSignalDeathPenalty(BaseDeathPenalty):
-    def handle_death_penalty(self, signum, frame):
+    def __init__(self, timeout: float) -> None:
+        super().__init__(timeout)
+        self.retries = 0
+
+    def handle_death_penalty(self, signum: int, frame: Any) -> None:
+        if self.retries >= 3:
+            # Avoid logging locks because this runs in a signal handler.
+            try:
+                os.write(
+                    2,
+                    b"Job timeout did not stop task after 3 attempts; "
+                    b"exiting worker.\n",
+                )
+            finally:
+                os._exit(1)
+
+        self.retries += 1
         raise JobTimeoutException(
-            'Job exceeded maximum timeout '
-            'value (%d seconds).' % self._timeout
+            "Job exceeded maximum timeout value (%d seconds)." % self._timeout
         )
 
-    def setup_death_penalty(self):
+    def setup_death_penalty(self) -> None:
         """Sets up an alarm signal and a signal handler that raises
         a JobTimeoutException after the timeout amount (expressed in
         seconds).
         """
         signal.signal(signal.SIGALRM, self.handle_death_penalty)
-        signal.setitimer(signal.ITIMER_REAL, self._timeout)
+        signal.setitimer(signal.ITIMER_REAL, self._timeout, 5)
 
-    def cancel_death_penalty(self):
+    def cancel_death_penalty(self) -> None:
         """Removes the death penalty alarm and puts back the system into
         default signal handling.
         """

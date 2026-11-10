@@ -1,14 +1,29 @@
 """Test workers."""
 
 import datetime
-from multiprocessing import Process
 import time
+from multiprocessing import Process
+from unittest import mock
 
+import pytest
 from freezefrog import FreezeTime
 
 from tasktiger import Task, Worker
+from tasktiger._internal import ACTIVE
+from tasktiger.executor import SyncExecutor
+from tasktiger.stats import StatsThread
+from tasktiger.worker import LOCK_REDIS_KEY
 
-from .tasks import long_task_ok, wait_for_long_task
+from .config import DELAY
+from .tasks import (
+    exception_task,
+    long_task_ok,
+    long_task_with_blocked_thread,
+    simple_task,
+    sleep_task,
+    system_exit_task,
+    wait_for_long_task,
+)
 from .test_base import BaseTestCase
 from .utils import external_worker
 
@@ -21,16 +36,18 @@ class TestMaxWorkers(BaseTestCase):
 
         # Queue three tasks
         for i in range(0, 3):
-            task = Task(self.tiger, long_task_ok, queue='a')
+            task = Task(self.tiger, long_task_ok, queue="a")
             task.delay()
-        self._ensure_queues(queued={'a': 3})
+        self._ensure_queues(queued={"a": 3})
 
         # Start two workers and wait until they start processing.
         worker1 = Process(
-            target=external_worker, kwargs={'max_workers_per_queue': 2}
+            target=external_worker,
+            kwargs={"worker_kwargs": {"max_workers_per_queue": 2}},
         )
         worker2 = Process(
-            target=external_worker, kwargs={'max_workers_per_queue': 2}
+            target=external_worker,
+            kwargs={"worker_kwargs": {"max_workers_per_queue": 2}},
         )
         worker1.start()
         worker2.start()
@@ -40,13 +57,13 @@ class TestMaxWorkers(BaseTestCase):
         wait_for_long_task()
 
         # Verify they both are active
-        self._ensure_queues(active={'a': 2}, queued={'a': 1})
+        self._ensure_queues(active={"a": 2}, queued={"a": 1})
 
         # This worker should fail to get the queue lock and exit immediately
         worker = Worker(self.tiger)
         worker.max_workers_per_queue = 2
         worker.run(once=True, force_once=True)
-        self._ensure_queues(active={'a': 2}, queued={'a': 1})
+        self._ensure_queues(active={"a": 2}, queued={"a": 1})
         # Wait for external workers
         worker1.join()
         worker2.join()
@@ -60,11 +77,11 @@ class TestMaxWorkers(BaseTestCase):
         """
 
         # Queue two tasks
-        task = Task(self.tiger, long_task_ok, queue='swq')
+        task = Task(self.tiger, long_task_ok, queue="swq")
         task.delay()
-        task = Task(self.tiger, long_task_ok, queue='swq')
+        task = Task(self.tiger, long_task_ok, queue="swq")
         task.delay()
-        self._ensure_queues(queued={'swq': 2})
+        self._ensure_queues(queued={"swq": 2})
 
         # Start a worker and wait until it starts processing.
         # It should start processing one task and hold a lock on the queue
@@ -76,21 +93,21 @@ class TestMaxWorkers(BaseTestCase):
 
         # This worker should fail to get the queue lock and exit immediately
         Worker(self.tiger).run(once=True, force_once=True)
-        self._ensure_queues(active={'swq': 1}, queued={'swq': 1})
+        self._ensure_queues(active={"swq": 1}, queued={"swq": 1})
         # Wait for external worker
         worker.join()
 
         # Clear out second task
         Worker(self.tiger).run(once=True, force_once=True)
-        self.conn.delete('long_task_ok')
+        self.conn.delete("long_task_ok")
 
         # Retest using a non-single worker queue
         # Queue two tasks
-        task = Task(self.tiger, long_task_ok, queue='not_swq')
+        task = Task(self.tiger, long_task_ok, queue="not_swq")
         task.delay()
-        task = Task(self.tiger, long_task_ok, queue='not_swq')
+        task = Task(self.tiger, long_task_ok, queue="not_swq")
         task.delay()
-        self._ensure_queues(queued={'not_swq': 2})
+        self._ensure_queues(queued={"not_swq": 2})
 
         # Start a worker and wait until it starts processing.
         # It should start processing one task
@@ -115,20 +132,20 @@ class TestMaxWorkers(BaseTestCase):
         with FreezeTime(datetime.datetime(2014, 1, 1)):
             # Queue three tasks
             for i in range(0, 3):
-                task = Task(self.tiger, long_task_ok, queue='a')
+                task = Task(self.tiger, long_task_ok, queue="a")
                 task.delay()
-            self._ensure_queues(queued={'a': 3})
+            self._ensure_queues(queued={"a": 3})
 
             # Ensure we can process one
             worker = Worker(self.tiger)
             worker.max_workers_per_queue = 2
             worker.run(once=True, force_once=True)
-            self._ensure_queues(queued={'a': 2})
+            self._ensure_queues(queued={"a": 2})
 
             # Set system lock so no processing should occur for 10 seconds
-            self.tiger.set_queue_system_lock('a', 10)
+            self.tiger.set_queue_system_lock("a", 10)
 
-            lock_timeout = self.tiger.get_queue_system_lock('a')
+            lock_timeout = self.tiger.get_queue_system_lock("a")
             assert lock_timeout == time.time() + 10
 
         # Confirm tasks don't get processed within the system lock timeout
@@ -136,11 +153,152 @@ class TestMaxWorkers(BaseTestCase):
             worker = Worker(self.tiger)
             worker.max_workers_per_queue = 2
             worker.run(once=True, force_once=True)
-            self._ensure_queues(queued={'a': 2})
+            self._ensure_queues(queued={"a": 2})
 
         # 10 seconds in the future the lock should have expired
         with FreezeTime(datetime.datetime(2014, 1, 1, 0, 0, 10)):
             worker = Worker(self.tiger)
             worker.max_workers_per_queue = 2
             worker.run(once=True, force_once=True)
-            self._ensure_queues(queued={'a': 1})
+            self._ensure_queues(queued={"a": 1})
+
+
+class TestSyncExecutorWorker:
+    def test_success(self, tiger, ensure_queues):
+        worker = Worker(tiger, executor_class=SyncExecutor)
+        worker.run(once=True, force_once=True)
+
+        task = Task(tiger, simple_task)
+        task.delay()
+        task = Task(tiger, simple_task)
+        task.delay()
+        ensure_queues(queued={"default": 2})
+
+        worker.run(once=True)
+        ensure_queues()
+
+    def test_handles_exception(self, tiger, ensure_queues):
+        Task(tiger, exception_task).delay()
+        worker = Worker(tiger, executor_class=SyncExecutor)
+        worker.run(once=True, force_once=True)
+        ensure_queues(error={"default": 1})
+
+    def test_handles_timeout(self, tiger, ensure_queues):
+        Task(tiger, long_task_with_blocked_thread).delay()
+        worker = Process(
+            target=external_worker,
+            kwargs={"worker_kwargs": {"executor_class": SyncExecutor}},
+        )
+        worker.start()
+        worker.join(timeout=DELAY * 5)
+        try:
+            assert worker.exitcode == 1
+        finally:
+            if worker.is_alive():
+                worker.kill()
+                worker.join()
+        ensure_queues(error={"default": 1})
+
+    def test_heartbeat(self, tiger):
+        # Test both task heartbeat and lock renewal.
+        # We set unique=True so the task ID matches the lock key.
+        task = Task(tiger, sleep_task, lock=True, unique=True)
+        task.delay()
+
+        # Start a worker and wait until it starts processing.
+        worker = Process(
+            target=external_worker,
+            kwargs={
+                "patch_config": {"ACTIVE_TASK_UPDATE_TIMER": DELAY / 2},
+                "worker_kwargs": {
+                    # Test queue lock.
+                    "max_workers_per_queue": 1,
+                    "executor_class": SyncExecutor,
+                },
+            },
+        )
+        worker.start()
+
+        time.sleep(DELAY)
+
+        queue_key = tiger._key(ACTIVE, "default")
+        queue_lock_key = tiger._key(LOCK_REDIS_KEY, "default")
+        task_lock_key = tiger._key("lockv2", task.id)
+
+        conn = tiger.connection
+
+        heartbeat_1 = conn.zscore(queue_key, task.id)
+        queue_lock_1 = conn.zrange(queue_lock_key, 0, -1, withscores=True)[0][1]
+        task_lock_1 = conn.pttl(task_lock_key)
+
+        time.sleep(DELAY / 2)
+
+        heartbeat_2 = conn.zscore(queue_key, task.id)
+        queue_lock_2 = conn.zrange(queue_lock_key, 0, -1, withscores=True)[0][1]
+        task_lock_2 = conn.pttl(task_lock_key)
+
+        assert heartbeat_2 > heartbeat_1 > 0
+        assert queue_lock_2 > queue_lock_1 > 0
+
+        # Active task update timeout is 2 * DELAY and we renew every DELAY / 2.
+        assert task_lock_1 > DELAY
+        assert task_lock_2 > DELAY
+
+        worker.kill()
+
+    def test_stop_heartbeat_thread_on_unhandled_exception(self, tiger, ensure_queues):
+        task = Task(tiger, system_exit_task)
+        task.delay()
+
+        # Start a worker and wait until it starts processing.
+        worker = Process(
+            target=external_worker,
+            kwargs={
+                "worker_kwargs": {
+                    "executor_class": SyncExecutor,
+                },
+            },
+        )
+        worker.start()
+
+        # Ensure process exits and does not hang here.
+        worker.join()
+
+        # Since SystemExit derives from BaseException and is therefore not
+        # handled by the executor, the task is still active until it times out
+        # and gets requeued by another worker.
+        ensure_queues(active={"default": 1})
+
+
+@pytest.mark.parametrize("failing_operation", [None, "scheduled", "expired"])
+def test_maintenance_stats_callbacks(tiger, monkeypatch, failing_operation):
+    worker = Worker(tiger)
+    worker._queue_set = set()
+    calls = mock.Mock()
+    calls.stats = mock.Mock(spec=StatsThread)
+    worker.stats_thread = calls.stats
+    monkeypatch.setattr(worker, "_worker_queue_scheduled_tasks", calls.scheduled)
+    monkeypatch.setattr(worker, "_worker_queue_expired_tasks", calls.expired)
+
+    if failing_operation:
+        getattr(calls, failing_operation).side_effect = RuntimeError("maintenance")
+        with pytest.raises(RuntimeError, match="maintenance"):
+            worker._worker_run()
+    else:
+        worker._worker_run()
+
+    expected = [mock.call.stats.report_maintenance_start(), mock.call.scheduled()]
+    if failing_operation != "scheduled":
+        expected.append(mock.call.expired())
+    expected.append(mock.call.stats.report_maintenance_end())
+    assert calls.mock_calls == expected
+
+
+def test_maintenance_without_stats(tiger, monkeypatch):
+    worker = Worker(tiger)
+    worker._queue_set = set()
+    calls = mock.Mock()
+    monkeypatch.setattr(worker, "_worker_queue_scheduled_tasks", calls.scheduled)
+    monkeypatch.setattr(worker, "_worker_queue_expired_tasks", calls.expired)
+    worker._worker_run()
+    assert calls.mock_calls == [mock.call.scheduled(), mock.call.expired()]

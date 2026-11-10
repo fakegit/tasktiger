@@ -1,39 +1,69 @@
 import copy
 import datetime
 import json
-import redis
 import time
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Collection,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
-from ._internal import *
+import redis
+from structlog.stdlib import BoundLogger
+
+from ._internal import (
+    ERROR,
+    QUEUED,
+    SCHEDULED,
+    g,
+    gen_id,
+    gen_unique_id,
+    get_timestamp,
+    import_attribute,
+    serialize_func_name,
+    serialize_retry_method,
+)
 from .exceptions import QueueFullException, TaskImportError, TaskNotFound
-from .runner import get_runner_class
+from .runner import BaseRunner, get_runner_class
+from .types import RetryStrategy, SerializedRetryStrategy
 
-__all__ = ['Task']
+if TYPE_CHECKING:
+    from . import TaskTiger
+
+__all__ = ["Task"]
 
 
-class Task(object):
+class Task:
     def __init__(
         self,
-        tiger,
-        func=None,
-        args=None,
-        kwargs=None,
-        queue=None,
-        hard_timeout=None,
-        unique=None,
-        unique_key=None,
-        lock=None,
-        lock_key=None,
-        retry=None,
-        retry_on=None,
-        retry_method=None,
-        max_queue_size=None,
-        runner_class=None,
+        tiger: "TaskTiger",
+        func: Optional[Callable] = None,
+        args: Optional[Any] = None,
+        kwargs: Optional[Any] = None,
+        queue: Optional[str] = None,
+        hard_timeout: Optional[float] = None,
+        unique: Optional[bool] = None,
+        unique_key: Optional[Collection[str]] = None,
+        lock: Optional[bool] = None,
+        lock_key: Optional[Collection[str]] = None,
+        retry: Optional[bool] = None,
+        retry_on: Optional[Collection[Type[BaseException]]] = None,
+        retry_method: Optional[Union[Callable[[int], float], RetryStrategy]] = None,
+        max_queue_size: Optional[int] = None,
+        max_stored_executions: Optional[int] = None,
+        runner_class: Optional[Type["BaseRunner"]] = None,
         # internal variables
-        _data=None,
-        _state=None,
-        _ts=None,
-        _executions=None,
+        _data: Any = None,
+        _state: Any = None,
+        _ts: Any = None,
+        _executions: Optional[List[Dict[str, Any]]] = None,
     ):
         """
         Queues a task. See README.rst for an explanation of the options.
@@ -59,31 +89,34 @@ class Task(object):
         serialized_name = serialize_func_name(func)
 
         if unique is None:
-            unique = getattr(func, '_task_unique', False)
+            unique = getattr(func, "_task_unique", False)
 
         if unique_key is None:
-            unique_key = getattr(func, '_task_unique_key', None)
+            unique_key = getattr(func, "_task_unique_key", None)
 
         if lock is None:
-            lock = getattr(func, '_task_lock', False)
+            lock = getattr(func, "_task_lock", False)
 
         if lock_key is None:
-            lock_key = getattr(func, '_task_lock_key', None)
+            lock_key = getattr(func, "_task_lock_key", None)
 
         if retry is None:
-            retry = getattr(func, '_task_retry', False)
+            retry = getattr(func, "_task_retry", False)
 
         if retry_on is None:
-            retry_on = getattr(func, '_task_retry_on', None)
+            retry_on = getattr(func, "_task_retry_on", None)
 
         if retry_method is None:
-            retry_method = getattr(func, '_task_retry_method', None)
+            retry_method = getattr(func, "_task_retry_method", None)
 
         if max_queue_size is None:
-            max_queue_size = getattr(func, '_task_max_queue_size', None)
+            max_queue_size = getattr(func, "_task_max_queue_size", None)
+
+        if max_stored_executions is None:
+            max_stored_executions = getattr(func, "_task_max_stored_executions", None)
 
         if runner_class is None:
-            runner_class = getattr(func, '_task_runner_class', None)
+            runner_class = getattr(func, "_task_runner_class", None)
 
         # normalize falsy args/kwargs to empty structures
         args = args or []
@@ -100,50 +133,48 @@ class Task(object):
         else:
             task_id = gen_id()
 
-        task = {'id': task_id, 'func': serialized_name}
+        task: Dict[str, Any] = {"id": task_id, "func": serialized_name}
         if unique or unique_key:
-            task['unique'] = True
+            task["unique"] = True
             if unique_key:
-                task['unique_key'] = unique_key
+                task["unique_key"] = unique_key
         if lock or lock_key:
-            task['lock'] = True
+            task["lock"] = True
             if lock_key:
-                task['lock_key'] = lock_key
+                task["lock_key"] = lock_key
         if args:
-            task['args'] = args
+            task["args"] = args
         if kwargs:
-            task['kwargs'] = kwargs
+            task["kwargs"] = kwargs
         if hard_timeout:
-            task['hard_timeout'] = hard_timeout
+            task["hard_timeout"] = hard_timeout
         if retry or retry_on or retry_method:
             if not retry_method:
-                retry_method = tiger.config['DEFAULT_RETRY_METHOD']
+                retry_method = tiger.config["DEFAULT_RETRY_METHOD"]
 
-            retry_method = serialize_retry_method(retry_method)
-
-            task['retry_method'] = retry_method
+            task["retry_method"] = serialize_retry_method(retry_method)
             if retry_on:
-                task['retry_on'] = [
-                    serialize_func_name(cls) for cls in retry_on
-                ]
+                task["retry_on"] = [serialize_func_name(cls) for cls in retry_on]
         if max_queue_size:
-            task['max_queue_size'] = max_queue_size
+            task["max_queue_size"] = max_queue_size
+        if max_stored_executions is not None:
+            task["max_stored_executions"] = max_stored_executions
         if runner_class:
             serialized_runner_class = serialize_func_name(runner_class)
-            task['runner_class'] = serialized_runner_class
+            task["runner_class"] = serialized_runner_class
 
         self._data = task
 
     @property
-    def id(self):
-        return self._data['id']
+    def id(self) -> str:
+        return self._data["id"]
 
     @property
-    def data(self):
+    def data(self) -> Dict[str, Any]:
         return self._data
 
     @property
-    def time_last_queued(self):
+    def time_last_queued(self) -> Optional[datetime.datetime]:
         timestamp = self._data.get("time_last_queued")
         if timestamp is None:
             return None
@@ -151,58 +182,75 @@ class Task(object):
             return datetime.datetime.utcfromtimestamp(timestamp)
 
     @property
-    def state(self):
+    def scheduled_at(self) -> Optional[datetime.datetime]:
+        """
+        The timestamp (datetime) of when the task was intended to run — either
+        the `when` value passed to `delay()`, or the time `delay()` was called
+        if no `when` was given. Returns None if the task has never been queued.
+        """
+        timestamp = self._data.get("scheduled_at")
+        if timestamp is None:
+            return None
+        return datetime.datetime.utcfromtimestamp(timestamp)
+
+    @property
+    def state(self) -> str:
         return self._state
 
     @property
-    def queue(self):
+    def queue(self) -> str:
+        assert self._queue
         return self._queue
 
     @property
-    def serialized_func(self):
-        return self._data['func']
+    def serialized_func(self) -> str:
+        return self._data["func"]
 
     @property
-    def lock(self):
-        return self._data.get('lock', False)
+    def lock(self) -> bool:
+        return self._data.get("lock", False)
 
     @property
-    def lock_key(self):
-        return self._data.get('lock_key')
+    def lock_key(self) -> Optional[str]:
+        return self._data.get("lock_key")
 
     @property
-    def args(self):
-        return self._data.get('args', [])
+    def args(self) -> List[Any]:
+        return self._data.get("args", [])
 
     @property
-    def kwargs(self):
-        return self._data.get('kwargs', {})
+    def kwargs(self) -> Dict[str, Any]:
+        return self._data.get("kwargs", {})
 
     @property
-    def hard_timeout(self):
-        return self._data.get('hard_timeout', None)
+    def hard_timeout(self) -> Optional[float]:
+        return self._data.get("hard_timeout", None)
 
     @property
-    def unique(self):
-        return self._data.get('unique', False)
+    def unique(self) -> bool:
+        return self._data.get("unique", False)
 
     @property
-    def unique_key(self):
-        return self._data.get('unique_key')
+    def unique_key(self) -> Optional[str]:
+        return self._data.get("unique_key")
 
     @property
-    def retry_method(self):
-        if 'retry_method' in self._data:
-            retry_func, retry_args = self._data['retry_method']
+    def retry_method(self) -> Optional[SerializedRetryStrategy]:
+        if "retry_method" in self._data:
+            retry_func, retry_args = self._data["retry_method"]
             return retry_func, retry_args
         else:
             return None
 
     @property
-    def retry_on(self):
-        return self._data.get('retry_on')
+    def retry_on(self) -> List[str]:
+        return self._data.get("retry_on")
 
-    def should_retry_on(self, exception_class, logger=None):
+    def should_retry_on(
+        self,
+        exception_class: Type[BaseException],
+        logger: Optional[BoundLogger] = None,
+    ) -> bool:
         """
         Whether this task should be retried when the given exception occurs.
         """
@@ -213,23 +261,27 @@ class Task(object):
             except TaskImportError:
                 if logger:
                     logger.error(
-                        'should_retry_on could not import class',
+                        "should_retry_on could not import class",
                         exception_name=n,
                     )
         return False
 
     @property
-    def func(self):
+    def func(self) -> Callable:
         if not self._func:
             self._func = import_attribute(self.serialized_func)
         return self._func
 
     @property
-    def serialized_runner_class(self):
-        return self._data.get('runner_class')
+    def max_stored_executions(self) -> Optional[int]:
+        return self._data.get("max_stored_executions")
 
     @property
-    def ts(self):
+    def serialized_runner_class(self) -> str:
+        return self._data.get("runner_class")
+
+    @property
+    def ts(self) -> Optional[datetime.datetime]:
         """
         The timestamp (datetime) of the task in the queue, or None, if the task
         hasn't been queued.
@@ -237,10 +289,16 @@ class Task(object):
         return self._ts
 
     @property
-    def executions(self):
+    def executions(self) -> List[Dict[str, Any]]:
         return self._executions
 
-    def _move(self, from_state=None, to_state=None, when=None, mode=None):
+    def _move(
+        self,
+        from_state: Optional[str] = None,
+        to_state: Optional[str] = None,
+        when: Optional[float] = None,
+        mode: Optional[str] = None,
+    ) -> None:
         """
         Internal helper to move a task from one state to another (e.g. from
         QUEUED to DELAYED). The "when" argument indicates the timestamp of the
@@ -255,9 +313,7 @@ class Task(object):
         the expected queue.
         """
 
-        pipeline = self.tiger.connection.pipeline()
         scripts = self.tiger.scripts
-        _key = self.tiger._key
 
         from_state = from_state or self.state
         queue = self.queue
@@ -265,62 +321,20 @@ class Task(object):
         assert from_state
         assert queue
 
-        scripts.fail_if_not_in_zset(
-            _key(from_state, queue), self.id, client=pipeline
-        )
-        if to_state:
-            if not when:
-                when = time.time()
-            if mode:
-                scripts.zadd(
-                    _key(to_state, queue), when, self.id, mode, client=pipeline
-                )
-            else:
-                pipeline.zadd(_key(to_state, queue), {self.id: when})
-            pipeline.sadd(_key(to_state), queue)
-        pipeline.zrem(_key(from_state, queue), self.id)
-
-        if not to_state:  # Remove the task if necessary
-            if self.unique:
-                # TODO: Do the following two in one call.
-
-                # Delete executions if there were no errors.
-                if from_state == ERROR:
-                    check_states = {}
-                else:
-                    check_states = {ERROR}
-                scripts.delete_if_not_in_zsets(
-                    _key('task', self.id, 'executions'),
-                    self.id,
-                    [_key(state, queue) for state in check_states],
-                    client=pipeline,
-                )
-
-                # Only delete task if it's not in any other queue
-                check_states = {ACTIVE, QUEUED, ERROR, SCHEDULED}
-                check_states.remove(from_state)
-                scripts.delete_if_not_in_zsets(
-                    _key('task', self.id),
-                    self.id,
-                    [_key(state, queue) for state in check_states],
-                    client=pipeline,
-                )
-            else:
-                # Safe to remove
-                pipeline.delete(_key('task', self.id, 'executions'))
-                pipeline.delete(_key('task', self.id))
-
-        scripts.srem_if_not_exists(
-            _key(from_state), queue, _key(from_state, queue), client=pipeline
-        )
-
-        if to_state == QUEUED and self.tiger.config["PUBLISH_QUEUED_TASKS"]:
-            pipeline.publish(_key('activity'), queue)
-
         try:
-            scripts.execute_pipeline(pipeline)
+            scripts.move_task(
+                id=self.id,
+                queue=self.queue,
+                from_state=from_state,
+                to_state=to_state,
+                unique=self.unique,
+                when=when or time.time(),
+                mode=mode,
+                key_func=self.tiger._key,
+                publish_queued_tasks=self.tiger.config["PUBLISH_QUEUED_TASKS"],
+            )
         except redis.ResponseError as e:
-            if '<FAIL_IF_NOT_IN_ZSET>' in e.args[0]:
+            if "<FAIL_IF_NOT_IN_ZSET>" in e.args[0]:
                 raise TaskNotFound(
                     'Task {} not found in queue "{}" in state "{}".'.format(
                         self.id, queue, from_state
@@ -330,33 +344,37 @@ class Task(object):
         else:
             self._state = to_state
 
-    def execute(self):
+    def execute(self) -> None:
         func = self.func
-        is_batch_func = getattr(func, '_task_batch', False)
+        is_batch_func = getattr(func, "_task_batch", False)
 
-        g['current_task_is_batch'] = is_batch_func
-        g['current_tasks'] = [self]
-        g['tiger'] = self.tiger
+        g["current_task_is_batch"] = is_batch_func
+        g["current_tasks"] = [self]
+        g["tiger"] = self.tiger
 
         try:
             runner_class = get_runner_class(self.tiger.log, [self])
             runner = runner_class(self.tiger)
             return runner.run_eager_task(self)
         finally:
-            g['current_task_is_batch'] = None
-            g['current_tasks'] = None
-            g['tiger'] = None
+            g["current_task_is_batch"] = None
+            g["current_tasks"] = None
+            g["tiger"] = None
 
-    def delay(self, when=None, max_queue_size=None):
+    def delay(
+        self,
+        when: Optional[Union[datetime.timedelta, datetime.datetime]] = None,
+        max_queue_size: Optional[int] = None,
+    ) -> None:
         tiger = self.tiger
 
         ts = get_timestamp(when)
 
         now = time.time()
-        self._data['time_last_queued'] = now
+        self._data["time_last_queued"] = now
 
         if max_queue_size is None:
-            max_queue_size = self._data.get('max_queue_size')
+            max_queue_size = self._data.get("max_queue_size")
 
         if not ts or ts <= now:
             # Immediately queue if the timestamp is in the past.
@@ -364,6 +382,8 @@ class Task(object):
             state = QUEUED
         else:
             state = SCHEDULED
+
+        self._data["scheduled_at"] = ts
 
         # When using ALWAYS_EAGER, make sure we have serialized the task to
         # ensure there are no serialization errors.
@@ -374,30 +394,32 @@ class Task(object):
             # the queue size is at the max
             queue_size = tiger.get_total_queue_size(self.queue)
             if queue_size >= max_queue_size:
-                raise QueueFullException('Queue size: {}'.format(queue_size))
+                raise QueueFullException("Queue size: {}".format(queue_size))
 
-        if tiger.config['ALWAYS_EAGER'] and state == QUEUED:
+        if tiger.config["ALWAYS_EAGER"] and state == QUEUED:
             return self.execute()
 
         pipeline = tiger.connection.pipeline()
         pipeline.sadd(tiger._key(state), self.queue)
-        pipeline.set(tiger._key('task', self.id), serialized_task)
+        pipeline.set(tiger._key("task", self.id), serialized_task)
         # In case of unique tasks, don't update the score.
         tiger.scripts.zadd(
             tiger._key(state, self.queue),
             ts,
             self.id,
-            mode='nx',
+            mode="nx",
             client=pipeline,
         )
         if state == QUEUED and tiger.config["PUBLISH_QUEUED_TASKS"]:
-            pipeline.publish(tiger._key('activity'), self.queue)
+            pipeline.publish(tiger._key("activity"), self.queue)
         pipeline.execute()
 
         self._state = state
         self._ts = ts
 
-    def update_scheduled_time(self, when):
+    def update_scheduled_time(
+        self, when: Optional[Union[datetime.timedelta, datetime.datetime]]
+    ) -> None:
         """
         Updates a scheduled task's date to the given date. If the task is not
         scheduled, a TaskNotFound exception is raised.
@@ -407,25 +429,34 @@ class Task(object):
         ts = get_timestamp(when)
         assert ts
 
-        pipeline = tiger.connection.pipeline()
-        key = tiger._key(SCHEDULED, self.queue)
-        tiger.scripts.zadd(key, ts, self.id, mode='xx', client=pipeline)
-        pipeline.zscore(key, self.id)
-        _, score = pipeline.execute()
-        if not score:
+        found = tiger.scripts.update_scheduled_time(
+            scheduled_zset_key=tiger._key(SCHEDULED, self.queue),
+            task_data_key=tiger._key("task", self.id),
+            score=ts,
+            member=self.id,
+        )
+        if not found:
             raise TaskNotFound(
                 'Task {} not found in queue "{}" in state "{}".'.format(
                     self.id, self.queue, SCHEDULED
                 )
             )
 
+        self._data["scheduled_at"] = ts
         self._ts = ts
 
-    def __repr__(self):
-        return u'<Task %s>' % self.func
+    def __repr__(self) -> str:
+        return "<Task %s>" % self.func
 
     @classmethod
-    def from_id(self, tiger, queue, state, task_id, load_executions=0):
+    def from_id(
+        cls,
+        tiger: "TaskTiger",
+        queue: str,
+        state: str,
+        task_id: str,
+        load_executions: int = 0,
+    ) -> "Task":
         """
         Loads a task with the given ID from the given queue in the given
         state. An integer may be passed in the load_executions parameter
@@ -433,11 +464,11 @@ class Task(object):
         latest). If the task doesn't exist, None is returned.
         """
         pipeline = tiger.connection.pipeline()
-        pipeline.get(tiger._key('task', task_id))
+        pipeline.get(tiger._key("task", task_id))
         pipeline.zscore(tiger._key(state, queue), task_id)
         if load_executions:
             pipeline.lrange(
-                tiger._key('task', task_id, 'executions'), -load_executions, -1
+                tiger._key("task", task_id, "executions"), -load_executions, -1
             )
             (
                 serialized_data,
@@ -460,19 +491,39 @@ class Task(object):
                 _ts=datetime.datetime.utcfromtimestamp(score),
             )
         else:
-            raise TaskNotFound('Task {} not found.'.format(task_id))
+            raise TaskNotFound("Task {} not found.".format(task_id))
 
     @classmethod
     def tasks_from_queue(
-        self, tiger, queue, state, skip=0, limit=1000, load_executions=0
-    ):
+        cls,
+        tiger: "TaskTiger",
+        queue: str,
+        state: str,
+        skip: int = 0,
+        limit: int = 1000,
+        load_executions: int = 0,
+        include_not_found: bool = False,
+    ) -> Tuple[int, List["Task"]]:
         """
-        Returns a tuple with the following information:
-        * total items in the queue
-        * tasks from the given queue in the given state, latest first.
+        Return tasks from a queue.
 
-        An integer may be passed in the load_executions parameter to indicate
-        how many executions should be loaded (starting from the latest).
+        Args:
+            tiger: TaskTiger instance.
+            queue: Name of the queue.
+            state: State of the task (QUEUED, ACTIVE, SCHEDULED, ERROR).
+            skip: Number of latest tasks to pass over.
+            limit: Maximum number of tasks to return.
+            load_executions: Maximum number of executions to load for each task
+                (starting from the latest).
+            include_not_found: Whether to include tasks that have no payload.
+
+        Returns:
+            Tuple with the following information:
+            * total items in the queue, including tasks without a payload
+            * the latest `limit` tasks after the latest `skip` tasks, in
+              ascending order of score. If tasks without a payload are left
+              out, this list can be shorter than `limit` before the end of the
+              queue.
         """
 
         key = tiger._key(state, queue)
@@ -484,27 +535,29 @@ class Task(object):
         tasks = []
 
         if items:
-            tss = [
-                datetime.datetime.utcfromtimestamp(item[1]) for item in items
-            ]
+            tss = [datetime.datetime.utcfromtimestamp(item[1]) for item in items]
             if load_executions:
                 pipeline = tiger.connection.pipeline()
-                pipeline.mget([tiger._key('task', item[0]) for item in items])
+                pipeline.mget([tiger._key("task", item[0]) for item in items])
                 for item in items:
                     pipeline.lrange(
-                        tiger._key('task', item[0], 'executions'),
+                        tiger._key("task", item[0], "executions"),
                         -load_executions,
                         -1,
                     )
                 results = pipeline.execute()
 
-                for serialized_data, serialized_executions, ts in zip(
-                    results[0], results[1:], tss
+                for idx, serialized_data, serialized_executions, ts in zip(
+                    range(len(items)), results[0], results[1:], tss
                 ):
-                    data = json.loads(serialized_data)
-                    executions = [
-                        json.loads(e) for e in serialized_executions if e
-                    ]
+                    if serialized_data is None:
+                        if not include_not_found:
+                            continue
+                        data = {"id": items[idx][0]}
+                    else:
+                        data = json.loads(serialized_data)
+
+                    executions = [json.loads(e) for e in serialized_executions if e]
 
                     task = Task(
                         tiger,
@@ -517,36 +570,42 @@ class Task(object):
 
                     tasks.append(task)
             else:
-                data = tiger.connection.mget(
-                    [tiger._key('task', item[0]) for item in items]
+                result = tiger.connection.mget(
+                    [tiger._key("task", item[0]) for item in items]
                 )
-                for serialized_data, ts in zip(data, tss):
-                    data = json.loads(serialized_data)
-                    task = Task(
-                        tiger, queue=queue, _data=data, _state=state, _ts=ts
-                    )
+                for idx, serialized_data, ts in zip(range(len(items)), result, tss):
+                    if serialized_data is None:
+                        if not include_not_found:
+                            continue
+                        data = {"id": items[idx][0]}
+                    else:
+                        data = json.loads(serialized_data)
+
+                    task = Task(tiger, queue=queue, _data=data, _state=state, _ts=ts)
                     tasks.append(task)
 
         return n, tasks
 
     @classmethod
-    def queue_from_function(cls, func, tiger):
+    def queue_from_function(cls, func: Any, tiger: "TaskTiger") -> str:
         """Get queue from function."""
-        return getattr(func, '_task_queue', tiger.config['DEFAULT_QUEUE'])
+        return getattr(func, "_task_queue", tiger.config["DEFAULT_QUEUE"])
 
-    def n_executions(self):
+    def n_executions(self) -> int:
         """
         Queries and returns the number of past task executions.
         """
         pipeline = self.tiger.connection.pipeline()
-        pipeline.exists(self.tiger._key('task', self.id))
-        pipeline.llen(self.tiger._key('task', self.id, 'executions'))
-        exists, n_executions = pipeline.execute()
-        if not exists:
-            raise TaskNotFound('Task {} not found.'.format(self.id))
-        return n_executions
+        pipeline.exists(self.tiger._key("task", self.id))
+        pipeline.get(self.tiger._key("task", self.id, "executions_count"))
 
-    def retry(self):
+        exists, executions_count = pipeline.execute()
+        if not exists:
+            raise TaskNotFound("Task {} not found.".format(self.id))
+
+        return int(executions_count or 0)
+
+    def retry(self) -> None:
         """
         Retries a task that's in the error queue.
 
@@ -555,7 +614,7 @@ class Task(object):
         """
         self._move(from_state=ERROR, to_state=QUEUED)
 
-    def cancel(self):
+    def cancel(self) -> None:
         """
         Cancels a task that is queued in the SCHEDULED queue.
 
@@ -564,7 +623,7 @@ class Task(object):
         """
         self._move(from_state=SCHEDULED)
 
-    def delete(self):
+    def delete(self) -> None:
         """
         Removes a task that's in the error queue.
 
@@ -573,7 +632,7 @@ class Task(object):
         """
         self._move(from_state=ERROR)
 
-    def clone(self):
+    def clone(self) -> "Task":
         """Returns a clone of the this task"""
         return type(self)(
             tiger=self.tiger,
@@ -585,9 +644,9 @@ class Task(object):
             _data=copy.copy(self._data),
         )
 
-    def _queue_for_next_period(self):
+    def _queue_for_next_period(self) -> float:
         now = datetime.datetime.utcnow()
-        schedule = self.func._task_schedule
+        schedule = self.func._task_schedule  # type: ignore[attr-defined]
         if callable(schedule):
             schedule_func = schedule
             schedule_args = ()
@@ -598,7 +657,7 @@ class Task(object):
             # recalculate the unique id so that malformed ids don't persist
             # between executions
             task = self.clone()
-            task._data['id'] = gen_unique_id(
+            task._data["id"] = gen_unique_id(
                 task.serialized_func, task.args, task.kwargs
             )
             task.delay(when=when)

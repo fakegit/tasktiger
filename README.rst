@@ -1,8 +1,8 @@
 =========
 TaskTiger
 =========
-.. image:: https://circleci.com/gh/closeio/tasktiger/tree/master.svg?style=svg&circle-token=a86617952aa9b4cfee784b6ac43358cd042a6672
-    :target: https://circleci.com/gh/closeio/tasktiger/tree/master
+.. image:: https://github.com/closeio/tasktiger/actions/workflows/test.yaml/badge.svg?event=push
+    :target: https://github.com/closeio/tasktiger/actions/workflows/test.yaml
 
 *TaskTiger* is a Python task queue using Redis.
 
@@ -18,13 +18,21 @@ TaskTiger
 Features
 --------
 
-- Per-task fork
+- Per-task fork or synchronous worker
 
-  TaskTiger forks a subprocess for each task, This comes with several benefits:
-  Memory leaks caused by tasks are avoided since the subprocess is terminated
-  when the task is finished. A hard time limit can be set for each task, after
-  which the task is killed if it hasn't completed. To ensure performance, any
-  necessary Python modules can be preloaded in the parent process.
+  By default, TaskTiger forks a subprocess for each task, This comes with
+  several benefits: Memory leaks caused by tasks are avoided since the
+  subprocess is terminated when the task is finished. A hard time limit can be
+  set for each task, after which the task is killed if it hasn't completed. To
+  ensure performance, any necessary Python modules can be preloaded in the
+  parent process.
+
+  TaskTiger also supports synchronous workers, which allows for better
+  performance due to no forking overhead, and tasks have the ability to reuse
+  network connections. To prevent memory leaks from accumulating, workers can
+  be set to shutdown after a certain amount of time, at which point a
+  supervisor can restart them. Workers also automatically exit on on hard
+  timeouts to prevent an inconsistent process state.
 
 - Unique queues
 
@@ -173,6 +181,18 @@ decorate and queue tasks. The constructor takes the following arguments:
     If set to a non-empty list of queue names, a worker only processes the
     given queues (and their subqueues), unless explicit queues are passed to
     the command line.
+
+  - ``STATS_INTERVAL``
+
+    Interval in seconds between worker task runtime statistics (default: 60).
+    Set to 0 to disable the stats thread and its callbacks. Queue maintenance
+    can occupy a worker outside task-execution statistics. When enabled,
+    ``StatsThread.report_maintenance_start()`` and ``report_maintenance_end()``
+    bracket the combined scheduled-task promotion and expired-task recovery
+    pass, with the end callback called even if either operation raises.
+    The hooks allow custom instrumentation; their defaults are no-ops and do
+    not change task runtime or utilization statistics. No maintenance callbacks
+    run when maintenance is not due or the worker is stopping.
 
 - ``setup_structlog``
 
@@ -389,7 +409,7 @@ The following options can be only specified in the task decorator:
   the initial task execution date when a worker is initialized, and to determine
   the next execution date when the task is about to get executed.
 
-  For most common scenarios, the ``periodic`` built-in function can be passed:
+  For most common scenarios, the below mentioned built-in functions can be passed:
 
   - ``periodic(seconds=0, minutes=0, hours=0, days=0, weeks=0, start_date=None,
     end_date=None)``
@@ -400,6 +420,17 @@ The following options can be only specified in the task decorator:
     indefinitely, use ``schedule=periodic(minutes=5)``. To run a task every
     every Sunday at 4am UTC, you could use
     ``schedule=periodic(weeks=1, start_date=datetime.datetime(2000, 1, 2, 4))``.
+
+  - ``cron_expr(expr, start_date=None, end_date=None)``
+
+    ``start_date``, to specify the periodic task start date. It defaults to 
+    ``2000-01-01T00:00Z``, a Saturday, if not given.
+    ``end_date``, to specify the periodic task end date. The task repeats 
+    forever if ``end_date`` is not given. 
+    For example, to run a task every hour indefinitely,
+    use ``schedule=cron_expr("0 * * * *")``. To run a task every Sunday at 
+    4am UTC, you could use ``schedule=cron_expr("0 4 * * 0")``.
+
 
 Custom retrying
 ---------------
@@ -541,6 +572,18 @@ Workers support the following options:
 
   Store tracebacks with execution history (config defaults to ``True``).
 
+- ``--executor``
+
+  Can be ``fork`` (default) or ``sync``. Whether to execute tasks in a separate
+  process via fork, or execute them synchronously in the same proces. See
+  "Features" section for the benefits of either approach.
+
+- ``--exit-after``
+
+  Exit the worker after the time in minutes has elapsed. This is mainly useful
+  with the synchronous executor to prevent memory leaks from accumulating.
+
+
 In some cases it is convenient to have a custom TaskTiger launch script. For
 example, your application may have a ``manage.py`` command that sets up the
 environment and you may want to launch TaskTiger workers using that script. To
@@ -563,28 +606,6 @@ TaskTiger worker and parses any command line arguments. Here is an example:
       # ./manage.py tasktiger --help
       tiger.run_worker_with_args(sys.argv[2:])
       sys.exit(0)
-
-If you're using ``flask-script``, you can use the ``TaskTigerCommand`` provided
-in the ``tasktiger.flask_script`` module. It takes the ``TaskTiger`` instance
-as an argument. Tasks will have access to Flask's application context. Example:
-
-.. code:: python
-
-  from flask import Flask
-  from flask.ext.script import Manager
-  from tasktiger.flask_script import TaskTigerCommand
-
-  app = Flask()
-  manager = Manager(app)
-  tiger = TaskTiger(setup_structlog=True)
-
-  manager.add_command('tasktiger', TaskTigerCommand(tiger))
-
-  if __name__ == "__main__":
-      manager.run()
-
-You can subclass the ``TaskTigerCommand`` and override the ``setup`` method to
-implement any custom setup that needs to be done before running the worker.
 
 
 Inspect, requeue and delete tasks

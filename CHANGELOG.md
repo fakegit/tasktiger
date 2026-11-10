@@ -1,5 +1,162 @@
 # Changelog
 
+## Version 0.27.0
+
+* Added no-op stats hooks around scheduled-task promotion and expired-task recovery for custom instrumentation, without changing task runtime statistics.
+
+## Version 0.26.3
+
+* Fixed type annotations that type checkers other than Mypy (for example, Ty) reported as incorrect ([#385](https://github.com/closeio/tasktiger/pull/385)).
+
+## Version 0.26.2
+
+* Force-exit sync workers after hard timeouts so interpreter shutdown cannot leave them waiting for task-created threads ([#384](https://github.com/closeio/tasktiger/pull/384)).
+
+## Version 0.26.1
+
+* `Task.tasks_from_queue` leaves out tasks without a payload if `include_not_found` is false. Versions 0.23.0 to 0.26.0 raised `UnboundLocalError` or returned the previous task again ([#382](https://github.com/closeio/tasktiger/pull/382)).
+
+## Version 0.26.0
+
+* Re-deliver Unix hard timeout signals and force-exit workers when timeout exceptions fail to stop the task ([#379](https://github.com/closeio/tasktiger/pull/379)).
+
+## Version 0.25.0
+
+* Added `Task.scheduled_at` property signifying when the task is/was supposed to run.
+
+## Version 0.24.0
+
+* Reverted "Added type safety to task decorator [302](https://github.com/closeio/tasktiger/issues/302)" due to buggy interaction with scheduled tasks.
+
+## Version 0.23.0
+
+**Should not be used, use 0.24.0 and above instead**
+
+* Added `Task.current_task_is_batch`
+
+## Version 0.22.0
+
+**Should not be used, use 0.24.0 and above instead**
+
+* Minimum python version is now 3.10
+* Added type safety to task decorator [302](https://github.com/closeio/tasktiger/issues/302). Wrapped functions retain type information for params and return value, plus capture some config that is added to the function.
+
+## Version 0.21.0
+
+* When raising `RetryException` with no `method`, use task decorator retry method if set ([356](https://github.com/closeio/tasktiger/pull/356))
+
+## Version 0.20.0
+
+* Add `tiger.get_sizes_for_queues_and_states` ([352](https://github.com/closeio/tasktiger/pull/352))
+
+## Version 0.19.5
+
+* First version using the automated-release process
+
+## Version 0.19.4
+
+* Log task processing in sync executor ([347](https://github.com/closeio/tasktiger/pull/347))
+* Test and Docstring improvements ([338](https://github.com/closeio/tasktiger/pull/338), [343](https://github.com/closeio/tasktiger/pull/343))
+
+## Version 0.19.3
+
+* Stop heartbeat thread in case of unhandled exceptions ([335](https://github.com/closeio/tasktiger/pull/335))
+
+## Version 0.19.2
+
+* Heartbeat threading-related fixes with synchronous worker ([333](https://github.com/closeio/tasktiger/pull/333))
+
+## Version 0.19.1
+
+* Implement heartbeat with synchronous TaskTiger worker ([331](https://github.com/closeio/tasktiger/pull/331))
+
+## Version 0.19
+
+* Adding synchronous (non-forking) executor ([319](https://github.com/closeio/tasktiger/pull/319), [320](https://github.com/closeio/tasktiger/pull/320))
+* If possible, retry tasks that fail with "execution not found" ([323](https://github.com/closeio/tasktiger/pull/323))
+* Option to exit TaskTiger after a certain amount of time ([324](https://github.com/closeio/tasktiger/pull/324))
+
+## Version 0.18.2
+
+* Purge errored tasks even if task object is not found ([310](https://github.com/closeio/tasktiger/pull/310))
+
+## Version 0.18.1
+
+* Added `current_serialized_func` property to `TaskTiger` object ([296](https://github.com/closeio/tasktiger/pull/296))
+
+## Version 0.18.0
+
+* Added support for Redis >= 6.2.7 ([268](https://github.com/closeio/tasktiger/issues/268))
+
+### ⚠️ Breaking changes
+
+* Removed `execute_pipeline` script ([284](https://github.com/closeio/tasktiger/pull/284))
+
+### Other changes
+
+* Added typing to more parts of the codebase
+* Dropped Python 3.7 support, added Python 3.11 support
+* Added CI checks to ensure compatibility on redis-py versions (currently >=3.3.0,<5)
+
+## Version 0.17.1
+
+### Other changes
+
+* Add 'task_func' to logging processor ([265](https://github.com/closeio/tasktiger/pull/265))
+* Deprecate Flask-Script integration ([260](https://github.com/closeio/tasktiger/pull/260))
+
+## Version 0.17.0
+
+### ⚠️ Breaking changes
+
+#### Allow truncating task executions ([251](https://github.com/closeio/tasktiger/pull/251))
+
+##### Overview
+
+This version of TaskTiger switches to using the `t:task:<id>:executions_count` Redis key to determine the total number of task executions. In previous versions this was accomplished by obtaining the length of `t:task:<id>:executions`. This change was required for the introduction of a parameter to enable the truncation of task execution entries. This is useful for tasks with many retries, where execution entries consume a lot of memory.
+
+This behavior is incompatible with the previous mechanism and requires a migration to populate the task execution counters.
+Without the migration, the execution counters will behave as though they were reset, which may result in existing tasks retrying more times than they should.
+
+##### Migration
+
+The migration can be executed fully live without concern for data integrity.
+
+1. Upgrade TaskTiger to `0.16.2` if running a version lower than that.
+2. Call `tasktiger.migrations.migrate_executions_count` with your `TaskTiger` instance, e.g.:
+```py
+from tasktiger import TaskTiger
+from tasktiger.migrations import migrate_executions_count
+
+# Instantiate directly or import from your application module
+tiger = TaskTiger(...)
+
+# This could take a while depending on the
+# number of failed/retrying tasks you have
+migrate_executions_count(tiger)
+```
+3. Upgrade TaskTiger to `0.17.0`. Done!
+
+#### Import cleanup ([258](https://github.com/closeio/tasktiger/pull/258))
+
+Due to a cleanup of imports, some internal TaskTiger objects can no longer be imported from the public modules. This shouldn't cause problems for most users, but it's a good idea to double check that all imports from the TaskTiger package continue to function correctly in your application.
+
+## Version 0.16.2
+
+### Other changes
+
+* Prefilter polled queues ([242](https://github.com/closeio/tasktiger/pull/242))
+* Use SSCAN to prefilter queues in scheduled state ([248](https://github.com/closeio/tasktiger/pull/248))
+* Add task execution counter ([252](https://github.com/closeio/tasktiger/pull/252))
+
+## Version 0.16.1
+
+### Other changes
+
+* Add function name to tasktiger done log messages ([203](https://github.com/closeio/tasktiger/pull/203))
+* Add task args / kwargs to the task_error log statement ([215](https://github.com/closeio/tasktiger/pull/215))
+* Fix `hard_timeout` in parent process when stored on task function ([235](https://github.com/closeio/tasktiger/pull/235))
+
 ## Version 0.16
 
 ### Other changes
@@ -22,7 +179,7 @@
 
 ## Version 0.13
 
-### Breaking changes
+### ⚠️ Breaking changes
 
 #### Changing the locking mechanism
 
@@ -68,7 +225,7 @@ Plus, there is:
 
 ## Version 0.12
 
-### Breaking changes
+### ⚠️ Breaking changes
 
 * Drop support for redis-py 2 ([#183](https://github.com/closeio/tasktiger/pull/183))
 
